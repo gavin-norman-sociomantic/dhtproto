@@ -41,7 +41,7 @@ public alias IListenerTemplate!(cstring) DhtListener;
 
 *******************************************************************************/
 
-public DHT global_storage;
+// public DHT global_storage;
 
 /*******************************************************************************
 

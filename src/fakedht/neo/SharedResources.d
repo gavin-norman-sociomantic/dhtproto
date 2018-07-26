@@ -43,6 +43,9 @@ class SharedResources : IRequestResources
         void[] data;
     }
 
+    /// TODO
+    public DHT* storage;
+
     /***************************************************************************
 
         Returns:

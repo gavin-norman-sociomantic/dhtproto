@@ -66,22 +66,8 @@ private Dht _dht;
 
 *******************************************************************************/
 
-public class Dht : Node!(DhtNode, "dht")
+public class Dht : Cluster!(DhtNode, "dht")
 {
-    import dhtproto.client.legacy.DhtConst;
-    import Hash = swarm.util.Hash;
-    import swarm.neo.AddrPort;
-
-    import ocean.core.Enforce;
-
-    import ocean.util.serialize.contiguous.Contiguous;
-    import ocean.util.serialize.contiguous.Serializer;
-    import ocean.util.serialize.contiguous.Deserializer;
-    import ocean.util.serialize.contiguous.MultiVersionDecorator;
-    import ocean.util.serialize.Version;
-
-    import ocean.text.convert.Integer_tango;
-
     /***************************************************************************
 
         Prepares DHT singleton for usage from tests
@@ -92,6 +78,37 @@ public class Dht : Node!(DhtNode, "dht")
     {
         if ( !_dht )
             _dht = new Dht();
+    }
+
+    /// TODO
+    public override DhtNode addNode ( AddrPort addr )
+    {
+        auto node = super.addnode(addr);
+        this.distributeHashRanges();
+        return node;
+    }
+
+    /// TODO
+    private void distributeHashRanges ( )
+    {
+        auto range = hash_t.max / this.nodes.length;
+        hash_t last = hash_t.min;
+        foreach ( i, node; this.nodes )
+        {
+            if ( i == this.nodes.length - 1 )
+                node.hash_range = node.hash_range(last, hash_t.max);
+            else
+                node.hash_range = node.hash_range(last, last + range);
+        }
+    }
+
+    /// TODO
+    private DhtNode getByHash ( hash_t hash )
+    {
+        foreach ( node; this.nodes )
+            if ( hash in node.hash_range )
+                return node;
+        return null;
     }
 
     /***************************************************************************
@@ -128,7 +145,9 @@ public class Dht : Node!(DhtNode, "dht")
         char[Hash.HashDigits] str_key;
         Hash.toHexString(key, str_key);
 
-        global_storage.getCreate(channel).put(str_key.dup, serialized_data);
+        auto node = this.getByHash(key);
+        verify(node !is null);
+        node.storage.getCreate(channel).put(str_key.dup, serialized_data);
     }
 
     unittest
@@ -172,7 +191,9 @@ public class Dht : Node!(DhtNode, "dht")
         char[Hash.HashDigits] str_key;
         Hash.toHexString(key, str_key);
 
-        auto data = global_storage.getVerify(channel).getVerify(str_key[]);
+        auto node = this.getByHash(key);
+        verify(node !is null);
+        auto data = node.storage.getVerify(channel).getVerify(str_key[]);
 
         static if (is(T : cstring))
             return cast(T) data.dup;
@@ -216,10 +237,13 @@ public class Dht : Node!(DhtNode, "dht")
 
     public hash_t[] getAllKeys ( cstring channel )
     {
-        auto string_keys = global_storage.getVerify(channel).getKeys();
         hash_t[] result;
-        foreach (key; string_keys)
-            result ~= toUlong(key, 16);
+        foreach ( node; this.nodes )
+        {
+            auto string_keys = node.storage.getVerify(channel).getKeys();
+            foreach (key; string_keys)
+                result ~= toUlong(key, 16);
+        }
         return result;
     }
 
@@ -242,14 +266,17 @@ public class Dht : Node!(DhtNode, "dht")
     {
         KeyValuePair!(T)[] result;
 
-        auto keys = this.getAllKeys(channel);
-
-        foreach (key; keys)
+        foreach ( node; this.nodes )
         {
-            KeyValuePair!(T) record;
-            record.key = key;
-            record.value = this.get!(T)(channel, key);
-            result ~= record;
+            auto string_keys = node.storage.getVerify(channel).getKeys();
+            foreach ( key; string_keys )
+            {
+                auto hash = toUlong(key, 16);
+                KeyValuePair!(T) record;
+                record.key = hash;
+                record.value = node.get!(T)(channel, hash);
+                result ~= record;
+            }
         }
 
         return result;
@@ -282,8 +309,11 @@ public class Dht : Node!(DhtNode, "dht")
     public ChannelSize getSize ( cstring channel)
     {
         ChannelSize result;
-        if (auto channel_obj = global_storage.get(channel))
-            channel_obj.countSize(result.records, result.bytes);
+        foreach ( node; this.nodes )
+        {
+            if (auto channel_obj = node.storage.get(channel))
+                channel_obj.countSize(result.records, result.bytes);
+        }
         return result;
     }
 
@@ -315,7 +345,9 @@ public class Dht : Node!(DhtNode, "dht")
         // in this method because test task is still in control and fakedht
         // won't be able to handle request from tested application even if
         // it attempts to modify the record before this method is called
-        auto original = global_storage.getCreate(channel).get(str_key);
+        auto node = this.getByHash(key);
+        verify(node !is null);
+        auto original = node.storage.getCreate(channel).get(str_key);
         auto total_wait = 0.0;
 
         do
@@ -323,7 +355,7 @@ public class Dht : Node!(DhtNode, "dht")
             .wait(cast(uint) (check_interval * 1_000_000));
             total_wait += check_interval;
 
-            auto current = global_storage.getCreate(channel).get(str_key);
+            auto current = node.storage.getCreate(channel).get(str_key);
             if (original != current)
                 return;
         }
@@ -364,6 +396,8 @@ public class Dht : Node!(DhtNode, "dht")
         char[Hash.HashDigits] str_key;
         Hash.toHexString(key, str_key);
 
+        auto node = this.getByHash(key);
+        verify(node !is null);
         auto total_wait = 0.0;
 
         do
@@ -371,7 +405,7 @@ public class Dht : Node!(DhtNode, "dht")
             .wait(cast(uint) (check_interval * 1_000_000));
             total_wait += check_interval;
 
-            auto current = global_storage.getCreate(channel).get(str_key);
+            auto current = node.storage.getCreate(channel).get(str_key);
             if (dg(current))
                 return;
         }
@@ -385,6 +419,30 @@ public class Dht : Node!(DhtNode, "dht")
             timeout
         ));
     }
+}
+
+
+public class DhtNode : Node!(DhtNode)
+{
+    import dhtproto.client.legacy.DhtConst;
+    import Hash = swarm.util.Hash;
+    import swarm.neo.AddrPort;
+
+    import ocean.core.Enforce;
+
+    import ocean.util.serialize.contiguous.Contiguous;
+    import ocean.util.serialize.contiguous.Serializer;
+    import ocean.util.serialize.contiguous.Deserializer;
+    import ocean.util.serialize.contiguous.MultiVersionDecorator;
+    import ocean.util.serialize.Version;
+
+    import ocean.text.convert.Integer_tango;
+
+    /// TODO
+    public Hash.HashRange hash_range;
+
+    /// TODO
+    public DHT storage;
 
     /***************************************************************************
 
